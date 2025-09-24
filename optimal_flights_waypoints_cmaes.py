@@ -4,12 +4,12 @@ import numpy as np
 import pandas as pd
 import json
 from tqdm import tqdm
-from pitot import geodesy as geo
-from openap import nav, prop
+from openap import nav
 from traffic.data import navaids, airports
 from optimisation_waypoints import (
     plot_map,
     get_trajectory,
+    get_trajectory_bs,
     obj_function,
     get_fid_params,
 )
@@ -82,7 +82,9 @@ with open("data_generated/waypoints/current_waypoints.json", "w") as fp:
 # %%
 
 trajectories_pd = pd.DataFrame()
+trajectories_pd_bs = pd.DataFrame()
 trajectories = []
+trajectories_bs = []
 for fid in tqdm(fid_waypoints.keys()):
     end_coor, m0 = get_fid_params(fid)
     waypoints_coor = (
@@ -90,12 +92,15 @@ for fid in tqdm(fid_waypoints.keys()):
         + [[p.latitude, p.longitude] for p in fid_waypoints[fid]]
         + [end_coor]
     )
+    waypoints_coor_bs = [[p.latitude, p.longitude] for p in fid_waypoints[fid]] + [
+        end_coor
+    ]
+
     trajectory = get_trajectory(waypoints_coor, m0)
     trajectory["fid"] = fid
-    trajectories.append(trajectory)
-
     trajectory = trajectory[
         [
+            "fid",
             "ts",
             "h",
             "latitude",
@@ -110,25 +115,51 @@ for fid in tqdm(fid_waypoints.keys()):
             "grid_cost",
         ]
     ]
-    trajectory["fid"] = fid
+    trajectories.append(trajectory)
+
+    trajectory_bs = get_trajectory_bs(waypoints_coor_bs, m0)
+    trajectory_bs["fid"] = fid
+    trajectory_bs = trajectory_bs[
+        [
+            "fid",
+            "ts",
+            "h",
+            "latitude",
+            "longitude",
+            "altitude",
+            "tas",
+            "vertical_rate",
+            "fuel",
+            "mass",
+            "thrust",
+            "grid_cost_position",
+            "grid_cost",
+        ]
+    ]
+    trajectories_bs.append(trajectory_bs)
 
     trajectories_pd = pd.concat([trajectories_pd, trajectory])
+    trajectories_pd_bs = pd.concat([trajectories_pd_bs, trajectory_bs])
 
 trajectories_pd.to_csv(
-    f"data_generated/waypoints/flights_existing_procedure_{map_type}.csv",
+    f"data_generated/waypoints/flights_existing_procedure_straightlines_{map_type}.csv",
+    index=False,
+)
+trajectories_pd_bs.to_csv(
+    f"data_generated/waypoints/flights_existing_procedure_bluesky_{map_type}.csv",
     index=False,
 )
 
-fig = plot_map(trajectories)
+fig = plot_map(trajectories + trajectories_bs)
 plt.show()
 
 # %%
 
 
-def optim(fid, c=0.001, tol_fun=6, eval_max=10**3, verbose=False):
+def optim(fid, c=0.001, tol_fun=6, eval_max=10**3, verbose=False, method="lines"):
     waypoints = fid_waypoints[fid]
     end_coor, m0 = get_fid_params(fid)
-    obj_func = lambda x: obj_function(x, start_coor, end_coor, m0, c=c)
+    obj_func = lambda x: obj_function(x, start_coor, end_coor, m0, c=c, method=method)
 
     x0 = [
         val for pair in [(p.latitude, p.longitude) for p in waypoints] for val in pair
@@ -217,3 +248,50 @@ for fid in tqdm(fid_waypoints.keys()):
 
 fig = plot_map(trajectories + trajectories_opt)
 plt.show()
+
+# %%
+
+trajectories_opt_pd_bs = pd.DataFrame()
+
+trajectories_opt_bs = []
+fid_waypoints_opt_bs = {}
+for fid in tqdm(fid_waypoints.keys()):
+    end_coor, m0 = get_fid_params(fid)
+    x_opt, val_opt = optim(fid, verbose=True, method="BlueSky")
+    waypoints_coor_opt = [[i, j] for i, j in zip(x_opt[0::2], x_opt[1::2])] + [end_coor]
+    trajectory_opt_bs = get_trajectory_bs(waypoints_coor_opt, m0=m0)
+    trajectories_opt_bs.append(trajectory_opt_bs)
+
+    fid_waypoints_opt_bs[fid] = [[i, j] for i, j in zip(x_opt[0::2], x_opt[1::2])]
+
+    trajectory_opt_bs = trajectory_opt_bs[
+        [
+            "ts",
+            "h",
+            "latitude",
+            "longitude",
+            "altitude",
+            "tas",
+            "vertical_rate",
+            "fuel",
+            "mass",
+            "thrust",
+            "grid_cost_position",
+            "grid_cost",
+        ]
+    ]
+    trajectory_opt_bs["fid"] = fid
+
+    trajectories_opt_pd_bs = pd.concat([trajectories_opt_pd_bs, trajectory_opt_bs])
+    trajectories_opt_pd_bs.to_csv(
+        f"data_generated/waypoints/flights_noise_opt_bluesky_{map_type}.csv",
+        index=False,
+    )
+
+    with open("data_generated/waypoints/optimal_waypoints_bluesky.json", "w") as fp:
+        json.dump(fid_waypoints_opt_bs, fp)
+
+fig = plot_map(trajectories + trajectories_opt_bs)
+plt.show()
+
+# %%

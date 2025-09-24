@@ -6,8 +6,10 @@ from openap.gen import FlightGenerator
 import matplotlib
 import numpy as np
 import pandas as pd
-from openap import top, Thrust, FuelFlow, Drag
+from openap import aero, top, Thrust, FuelFlow, Drag
 from pitot import geodesy as geo
+import bluesky as bs
+from traffic.data import airports
 
 pd.set_option("display.max_rows", 15)
 
@@ -38,7 +40,7 @@ def plot_map(flights: pd.DataFrame, waypoints_coor=None):
         flights = [flights]
     with plt.style.context("traffic"):
         fig, ax = plt.subplots(
-            figsize=(10, 10), subplot_kw=dict(projection=Amersfoort())
+            figsize=(30, 30), subplot_kw=dict(projection=Amersfoort())
         )
         ax.add_feature(countries())
         for f in flights:
@@ -49,7 +51,7 @@ def plot_map(flights: pd.DataFrame, waypoints_coor=None):
             pop_map.query("pp>0").lon.values,
             pop_map.query("pp>0").lat.values,
             c=pop_map.query("pp>0").pp.values,
-            s=2,
+            s=5,
             transform=PlateCarree(),
             norm=norm2,
             alpha=1,
@@ -190,24 +192,87 @@ def get_trajectory(waypoints_coor, m0, dt=1):
     return flight_climb
 
 
-def obj_function(x, start, end, m0, c=0.001):
-    waypoints_coor = [start]
-    waypoints_coor += [[i, j] for i, j in zip(x[0::2], x[1::2])]
-    waypoints_coor += [end]
-    trajectory = get_trajectory(waypoints_coor, m0)
+bs.init(mode="sim", detached=True)
+
+
+def get_trajectory_bs(waypoints_coor, m0, dt=1, **kwargs):
+    start = airports["EHAM"]
+    end = waypoints_coor[-1]
+    max_dist = geo.distance(
+        start.latitude,
+        start.longitude,
+        end[0],
+        end[1],
+    )
+    acid = "AF0001"
+
+    altitude = kwargs.get("altitude", "FL350")
+    vs = kwargs.get("vs", 2500)
+
+    print(altitude, vs)
+
+    bs.stack.stack(
+        f"CRE {acid} A320 EHAM/RW18L 189 0 450;"
+        f"ORIG {acid} EHAM/RW18L;"
+        f"ALT {acid} {altitude};"
+        f"VS {acid} {vs};"
+        f"ADDWPT {acid} R1811;"
+    )
+
+    for w in waypoints_coor:
+        w0, w1 = w
+        bs.stack.stack(f"ADDWPT {acid} {w0} {w1};")
+
+    bs.stack.stack(f"DT {dt};FF")
+    data = []
+
+    current_dist = 0
+    while current_dist < max_dist:
+        bs.sim.step()
+        data += [
+            [
+                bs.traf.lat[0],
+                bs.traf.lon[0],
+                bs.traf.alt[0],
+                bs.traf.tas[0],
+                bs.traf.vs[0],
+            ]
+        ]
+
+        current_dist = geo.distance(
+            start.latitude,
+            start.longitude,
+            data[-1][0],
+            data[-1][1],
+        )
+
+    bs.stack.stack(f"DEL {acid};")
+
+    flight_climb = pd.DataFrame(
+        data, columns=["latitude", "longitude", "h", "tas", "vertical_rate"]
+    )
+    flight_climb["dt"] = dt
+    flight_climb["ts"] = np.arange(len(data))
+    flight_climb = flight_climb.assign(altitude=lambda x: (x.h / aero.ft).astype(int))
+    flight_climb = compute_metrics(flight_climb, m0)
+
+    return flight_climb
+
+
+def obj_function(x, start, end, m0, c=0.001, method="BlueSky"):
+    if method == "BlueSky":
+        waypoints_coor = [[i, j] for i, j in zip(x[0::2], x[1::2])]
+        waypoints_coor += [end]
+        trajectory = get_trajectory_bs(waypoints_coor, m0)
+    else:
+        waypoints_coor = [start]
+        waypoints_coor += [[i, j] for i, j in zip(x[0::2], x[1::2])]
+        waypoints_coor += [end]
+        trajectory = get_trajectory(waypoints_coor, m0)
     latitudes = trajectory.latitude.to_numpy()
     longitudes = trajectory.longitude.to_numpy()
     if len(trajectory) == 0:
         return 10**5
-
-    # track = geo.bearing(
-    #     latitudes[:-1],
-    #     longitudes[:-1],
-    #     latitudes[1:],
-    #     longitudes[1:],
-    # )
-    # if np.max(np.abs(np.diff(track))) > 60:
-    #     return 10**5
 
     distance = geo.distance(
         latitudes[-1],
